@@ -8,4 +8,4 @@ pytest-cache-files-*
 generated/pytest-cache-files-*
 .env
 *.pyc
-reported_alarms/
+
