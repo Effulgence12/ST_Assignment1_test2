@@ -19,11 +19,11 @@ def _load_dotenv(dotenv_path: Path = Path(".env")) -> None:
     Args:
         dotenv_path: Path to the .env file.
     """
-    # 如果没有 .env 文件，直接返回，允许通过系统环境变量注入配置。
+    # 如果本地没有 .env 文件，则直接回退到系统环境变量。
     if not dotenv_path.exists():
         return
 
-    # 逐行读取 .env，并解析成环境变量。
+    # 逐行读取 .env，并仅处理简单的 KEY=VALUE 配置。
     for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
         line: str = raw_line.strip()
 
@@ -37,9 +37,43 @@ def _load_dotenv(dotenv_path: Path = Path(".env")) -> None:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
 
-        # 不覆盖已存在的环境变量，保证外部注入优先级更高。
+        # 已存在的环境变量优先级更高，这里不做覆盖。
         if key and key not in os.environ:
             os.environ[key] = value
+
+
+def _normalize_base_url(base_url: str) -> str:
+    """Normalize a Qwen-compatible base URL for the OpenAI SDK."""
+    normalized: str = base_url.strip().rstrip("/")
+
+    if normalized.endswith("/chat/completions"):
+        normalized = normalized[: -len("/chat/completions")]
+
+    return normalized
+
+
+def _read_float_env(name: str, default: float) -> float:
+    """Read a float environment variable with validation."""
+    raw_value: str | None = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    try:
+        return float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {name} must be a float.") from exc
+
+
+def _read_int_env(name: str, default: int) -> int:
+    """Read an integer environment variable with validation."""
+    raw_value: str | None = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {name} must be an integer.") from exc
 
 
 class StaticAnalyzerLLM:
@@ -54,7 +88,7 @@ class StaticAnalyzerLLM:
         Raises:
             ValueError: If required environment variables are missing.
         """
-        # 优先读取 .env（如存在），同时兼容外部环境变量配置。
+        # 优先从项目根目录读取 .env，同时兼容外部注入的环境变量。
         _load_dotenv()
 
         api_key: str | None = os.getenv("QWEN_API_KEY")
@@ -66,9 +100,18 @@ class StaticAnalyzerLLM:
         if not base_url:
             raise ValueError("Environment variable QWEN_BASE_URL is required.")
 
-        # 模型优先级为显式传参 > 环境变量 > 默认值。
+        # 配置项统一在此收口，便于后续调试不同模型和超参数。
         self._model: str = model or env_model
-        self._client: OpenAI = OpenAI(api_key=api_key, base_url=base_url)
+        self._temperature: float = _read_float_env("QWEN_TEMPERATURE", 0.0)
+        self._max_tokens: int = _read_int_env("QWEN_MAX_TOKENS", 1200)
+        timeout_seconds: float = _read_float_env("REQUEST_TIMEOUT_SECONDS", 90.0)
+        max_retries: int = _read_int_env("REQUEST_MAX_RETRIES", 2)
+        self._client: OpenAI = OpenAI(
+            api_key=api_key,
+            base_url=_normalize_base_url(base_url),
+            timeout=timeout_seconds,
+            max_retries=max_retries,
+        )
 
     def _build_messages(self, source_code: str) -> list[dict[str, str]]:
         """Construct system and user messages for static code analysis.
@@ -79,7 +122,7 @@ class StaticAnalyzerLLM:
         Returns:
             A list of chat messages formatted for the OpenAI-compatible API.
         """
-        # 系统提示词中强制约束输出为 JSON，降低解析失败概率。
+        # 用严格 schema 约束模型输出，确保每个 issue 都绑定自己的 PoC。
         system_prompt: str = (
             "You are a Static Code Analyzer. Analyze the provided Python code and detect: "
             "(1) syntax errors, (2) security vulnerabilities, "
@@ -92,16 +135,20 @@ class StaticAnalyzerLLM:
             "      \"type\": \"<issue_type>\",\n"
             "      \"description\": \"<detailed description>\",\n"
             "      \"severity\": \"<low/medium/high>\",\n"
-            "      \"recommendation\": \"<how to fix>\"\n"
+            "      \"recommendation\": \"<how to fix>\",\n"
+            "      \"category\": \"<e.g., Code Quality / Security>\",\n"
+            "      \"reference\": \"<URL to official docs/PEP8/CWE>\",\n"
+            "      \"proof_of_concept\": \"<A standalone python script string demonstrating this specific issue. If not applicable, return null.>\"\n"
             "    }\n"
-            "  ],\n"
-            "  \"proof_of_concept\": \"<code>\"\n"
+            "  ]\n"
             "}. "
-            "The proof_of_concept must be a short Python script that demonstrates how one severe vulnerability could be exploited or could fail in execution."
+            "Each issue must contain its own proof_of_concept so that there is a strict 1-to-1 relationship between the issue and its test case. "
+            "If a proof_of_concept is not applicable for a specific issue, return null for that field."
         )
 
         user_prompt: str = (
-            "Analyze the following Python code and produce the strict JSON report:\n\n"
+            "Analyze the following Python code and produce the strict JSON report.\n"
+            "Do not wrap the response in markdown fences.\n\n"
             f"{source_code}"
         )
 
@@ -122,11 +169,13 @@ class StaticAnalyzerLLM:
         Raises:
             RuntimeError: If API response does not contain textual content.
         """
-        # 温度设为 0，尽量提升输出结构稳定性。
+        # 保留 json_object 模式，尽量让返回结构稳定且易于解析。
         response: Any = self._client.chat.completions.create(
             model=self._model,
             messages=self._build_messages(source_code),
-            temperature=0,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            response_format={"type": "json_object"},
         )
 
         content: str | None = response.choices[0].message.content
