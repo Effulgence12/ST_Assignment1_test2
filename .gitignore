@@ -9,3 +9,4 @@ generated/pytest-cache-files-*
 .env
 *.pyc
 reported_alarms/
+.DS_Store

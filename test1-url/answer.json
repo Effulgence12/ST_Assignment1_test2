@@ -1,0 +1,148 @@
+{
+    "function": "Url.from_bytes and Url._parse",
+    "test_cases": [
+      {
+        "input": {
+          "raw": "/path?query=1",
+          "allowed_url_schemes": null
+        },
+        "expected_output": "Url(scheme=None, username=None, password=None, hostname=None, port=None, remainder=b'/path?query=1')",
+        "covered_statements": [
+          "starts_with_single_slash = raw[0] == 47",
+          "starts_with_double_slash evaluated to False",
+          "if starts_with_single_slash and not starts_with_double_slash: return cls(remainder=raw)"
+        ],
+        "notes": "Covers the very first conditional branch returning early when a URL strictly starts with a single slash (often used in web server requests)."
+      },
+      {
+        "input": {
+          "raw": "http://admin:123@localhost:8080/path",
+          "allowed_url_schemes": null
+        },
+        "expected_output": "Url(scheme=b'http', username=b'admin', password=b'123', hostname=b'localhost', port=8080, remainder=b'/path')",
+        "covered_statements": [
+          "raw.split(b'://', 1) yielding 2 parts",
+          "scheme in allowed_url_schemes or DEFAULT_ALLOWED_URL_SCHEMES",
+          "if scheme is not None... branch",
+          "rest.split(SLASH, 1) yielding 2 parts",
+          "Url._parse: len(split_at) == 2 (credentials found)",
+          "Url._parse: num_parts == 2 (host and port found)"
+        ],
+        "notes": "Covers the standard full URL parsing flow, correctly splitting scheme, credentials (username/password), host, port, and remainder."
+      },
+      {
+        "input": {
+          "raw": "https://localhost",
+          "allowed_url_schemes": [
+            "https"
+          ]
+        },
+        "expected_output": "Url(scheme=b'https', username=None, password=None, hostname=b'localhost', port=None, remainder=None)",
+        "covered_statements": [
+          "rest.split(SLASH, 1) yielding 1 part (remainder=None)",
+          "Url._parse: num_parts == 1 (no port found)"
+        ],
+        "notes": "Covers URLs without a path/remainder and without ports, invoking the `num_parts == 1` branch in `_parse`."
+      },
+      {
+        "input": {
+          "raw": "ftp://localhost",
+          "allowed_url_schemes": [
+            "http",
+            "https"
+          ]
+        },
+        "expected_output": "Raises HttpProtocolException",
+        "covered_statements": [
+          "if scheme not in (allowed_url_schemes...): raise HttpProtocolException"
+        ],
+        "notes": "Validates the validation logic for allowed URL schemes, triggering the exception block when encountering an unallowed scheme."
+      },
+      {
+        "input": {
+          "raw": "//localhost/path",
+          "allowed_url_schemes": null
+        },
+        "expected_output": "Url(scheme=b'http', username=None, password=None, hostname=b'localhost', port=None, remainder=b'/path')",
+        "covered_statements": [
+          "starts_with_double_slash evaluated to True",
+          "else: rest = raw[len(SLASH + SLASH):]",
+          "scheme default substitution: scheme if not starts_with_double_slash else b'http'"
+        ],
+        "notes": "Tests URL schemes omitted but starting with a double slash, defaulting the scheme to 'http' and slicing the correct hostname/path."
+      },
+      {
+        "input": {
+          "raw": "localhost:443",
+          "allowed_url_schemes": null
+        },
+        "expected_output": "Url(scheme=None, username=None, password=None, hostname=b'localhost', port=443, remainder=None)",
+        "covered_statements": [
+          "if scheme is not None or starts_with_double_slash: evaluates to False",
+          "falls through to Url._parse(raw)",
+          "return cls(username=username, password=password, hostname=host, port=port)"
+        ],
+        "notes": "Covers HTTPS connect tunnel URLs where scheme and path are entirely omitted, relying purely on raw fallback parsing at the end of `from_bytes`."
+      },
+      {
+        "input": {
+          "raw": "http://::1:8080",
+          "allowed_url_schemes": null
+        },
+        "expected_output": "Url(scheme=b'http', username=None, password=None, hostname=b'[::1]', port=8080, remainder=None)",
+        "covered_statements": [
+          "Url._parse: try block for IPv6 port resolution",
+          "port = int(last_token[-1]) succeeds",
+          "if COLON in rhost and rhost[0] != '[' and rhost[-1] != ']': host = b'[' + host + b']'"
+        ],
+        "notes": "Executes the IPv6 resolution branch where `num_parts > 2` and the `try` block successfully resolves a port, followed by applying the bracket patch to the IPv6 address."
+      },
+      {
+        "input": {
+          "raw": "http://a:b:c",
+          "allowed_url_schemes": null
+        },
+        "expected_output": "Url(scheme=b'http', username=None, password=None, hostname=b'[a:b:c]', port=None, remainder=None)",
+        "covered_statements": [
+          "Url._parse: except ValueError",
+          "host, port = raw, None"
+        ],
+        "notes": "Covers the `ValueError` branch in `_parse` where IPv6 port mapping fails via `int()`, falling back to treating the entire raw string as the host, and applies the bracket patch."
+      },
+      {
+        "input": {
+          "raw": "http://[a:b:c]",
+          "allowed_url_schemes": null
+        },
+        "expected_output": "Url(scheme=b'http', username=None, password=None, hostname=b'[a:b:c]', port=None, remainder=None)",
+        "covered_statements": [
+          "Url._parse: except ValueError",
+          "IPv6 bracket patch condition evaluates to False (rhost[0] == '[')"
+        ],
+        "notes": "Covers the `ValueError` failure block, but intentionally skips the IPv6 bracket patch because the address is already enclosed in brackets."
+      },
+      {
+        "input": {
+          "raw": "http://admin@localhost:8080",
+          "allowed_url_schemes": null
+        },
+        "expected_output": "Raises ValueError",
+        "covered_statements": [
+          "Url._parse: if len(split_at) == 2:",
+          "username, password = split_at[0].split(COLON)"
+        ],
+        "notes": "Hits the missing password edge-case in credentials, forcing Python to raise a `ValueError: not enough values to unpack` inside `_parse`."
+      },
+      {
+        "input": {
+          "raw": "",
+          "allowed_url_schemes": null
+        },
+        "expected_output": "Raises IndexError",
+        "covered_statements": [
+          "starts_with_single_slash = raw[0] == 47"
+        ],
+        "notes": "Covers the absolute edge case of an empty byte string being provided, crashing out immediately on indexing."
+      }
+    ]
+  }
